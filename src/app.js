@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { AgendaService, NotFoundError } from './services/agenda-service.js';
 import { TaskService } from './services/task-service.js';
+import { BriefingService } from './services/briefing-service.js';
 import { ValidationError } from './domain/meeting.js';
 
 const CORS_HEADERS = {
@@ -50,7 +51,7 @@ export async function readJsonBody(req) {
   });
 }
 
-export function createRequestHandler({ agendaService, taskService }) {
+export function createRequestHandler({ agendaService, taskService, briefingService }) {
   return async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -132,6 +133,22 @@ export function createRequestHandler({ agendaService, taskService }) {
         return sendNoContent(res);
       }
 
+      // Briefing Routes
+      // GET /api/briefing
+      if (method === 'GET' && pathname === '/api/briefing') {
+        const date = url.searchParams.get('date') || undefined;
+        const briefing = await briefingService.getBriefingByDate(date);
+        return sendJson(res, 200, briefing);
+      }
+
+      // POST /api/briefing/refresh
+      if (method === 'POST' && pathname === '/api/briefing/refresh') {
+        const body = await readJsonBody(req);
+        const date = body?.date || url.searchParams.get('date') || undefined;
+        const briefing = await briefingService.refreshBriefing(date);
+        return sendJson(res, 200, briefing);
+      }
+
       // 404 Route Not Found
       return sendJson(res, 404, { error: `Route not found: ${method} ${pathname}` });
     } catch (err) {
@@ -147,12 +164,21 @@ export function createRequestHandler({ agendaService, taskService }) {
   };
 }
 
-export function createApp({ db, config = {} } = {}) {
+export function createApp({ db, config = {}, briefingService } = {}) {
   const agendaService = new AgendaService(db);
   const taskService = new TaskService(db);
-  const handler = createRequestHandler({ agendaService, taskService, config });
+  const resolvedBriefingService = briefingService || new BriefingService({ db });
+
+  const handler = createRequestHandler({
+    agendaService,
+    taskService,
+    briefingService: resolvedBriefingService,
+    config
+  });
+
   const server = http.createServer(handler);
   server.agendaService = agendaService;
   server.taskService = taskService;
+  server.briefingService = resolvedBriefingService;
   return server;
 }
