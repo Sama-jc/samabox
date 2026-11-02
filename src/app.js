@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { AgendaService, NotFoundError } from './services/agenda-service.js';
+import { TaskService } from './services/task-service.js';
 import { ValidationError } from './domain/meeting.js';
 
 const CORS_HEADERS = {
@@ -49,7 +50,7 @@ export async function readJsonBody(req) {
   });
 }
 
-export function createRequestHandler({ agendaService }) {
+export function createRequestHandler({ agendaService, taskService }) {
   return async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -93,6 +94,44 @@ export function createRequestHandler({ agendaService }) {
         return sendNoContent(res);
       }
 
+      // Task Routes
+      const taskIdMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
+
+      // GET /api/tasks
+      if (method === 'GET' && pathname === '/api/tasks') {
+        const date = url.searchParams.get('date') || undefined;
+        const status = url.searchParams.get('status') || undefined;
+        const priority = url.searchParams.get('priority') || undefined;
+        const isFocus = url.searchParams.has('isFocus')
+          ? url.searchParams.get('isFocus') === 'true'
+          : undefined;
+
+        const tasks = taskService.getTasksByDate(date, { status, priority, isFocus });
+        return sendJson(res, 200, tasks);
+      }
+
+      // POST /api/tasks
+      if (method === 'POST' && pathname === '/api/tasks') {
+        const body = await readJsonBody(req);
+        const task = taskService.createTask(body);
+        return sendJson(res, 201, { task });
+      }
+
+      // PATCH /api/tasks/:id
+      if (method === 'PATCH' && taskIdMatch) {
+        const id = decodeURIComponent(taskIdMatch[1]);
+        const body = await readJsonBody(req);
+        const task = taskService.updateTask(id, body);
+        return sendJson(res, 200, { task });
+      }
+
+      // DELETE /api/tasks/:id
+      if (method === 'DELETE' && taskIdMatch) {
+        const id = decodeURIComponent(taskIdMatch[1]);
+        taskService.deleteTask(id);
+        return sendNoContent(res);
+      }
+
       // 404 Route Not Found
       return sendJson(res, 404, { error: `Route not found: ${method} ${pathname}` });
     } catch (err) {
@@ -110,8 +149,10 @@ export function createRequestHandler({ agendaService }) {
 
 export function createApp({ db, config = {} } = {}) {
   const agendaService = new AgendaService(db);
-  const handler = createRequestHandler({ agendaService, config });
+  const taskService = new TaskService(db);
+  const handler = createRequestHandler({ agendaService, taskService, config });
   const server = http.createServer(handler);
   server.agendaService = agendaService;
+  server.taskService = taskService;
   return server;
 }
