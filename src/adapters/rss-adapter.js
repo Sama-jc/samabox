@@ -1,21 +1,5 @@
-export function cleanHtmlText(raw = '') {
-  if (typeof raw !== 'string') return '';
-  // Unwrap CDATA
-  let text = raw.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
-  // Strip HTML tags
-  text = text.replace(/<[^>]+>/g, ' ');
-  // Decode HTML entities
-  text = text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&nbsp;/g, ' ');
-  // Collapse whitespace
-  return text.replace(/\s+/g, ' ').trim();
-}
+import { cleanHtmlText, sanitizeUrl, isSafeUrl } from '../utils/sanitizer.js';
+export { cleanHtmlText };
 
 function extractTagContent(xmlChunk, tagName) {
   const cdataRegex = new RegExp(`<${tagName}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tagName}>`, 'i');
@@ -51,10 +35,10 @@ export function parseRssXml(xml, defaultSource = 'Security Feed') {
       publishedAt = new Date().toISOString();
     }
 
-    if (title && url) {
+    if (title && isSafeUrl(url)) {
       items.push({
         title,
-        url,
+        url: sanitizeUrl(url),
         source: defaultSource,
         publishedAt,
         contentSnippet
@@ -90,10 +74,10 @@ export function parseAtomXml(xml, defaultSource = 'Security Feed') {
       publishedAt = new Date().toISOString();
     }
 
-    if (title && url) {
+    if (title && isSafeUrl(url)) {
       items.push({
         title,
-        url,
+        url: sanitizeUrl(url),
         source: defaultSource,
         publishedAt,
         contentSnippet
