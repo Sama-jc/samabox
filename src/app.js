@@ -12,11 +12,29 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultPublicDir = path.resolve(__dirname, 'public');
 
-const CORS_HEADERS = {
+export const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type'
 };
+
+export const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'strict-origin-when-cross-origin'
+};
+
+export const COMMON_HEADERS = {
+  ...CORS_HEADERS,
+  ...SECURITY_HEADERS
+};
+
+export class PayloadTooLargeError extends Error {
+  constructor(message = 'Payload too large. Maximum size allowed is 64KB.') {
+    super(message);
+    this.name = 'PayloadTooLargeError';
+  }
+}
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -40,7 +58,7 @@ export function serveStaticFile(req, res, publicDir, pathname) {
   if (!safePath.startsWith(publicDir)) {
     res.writeHead(403, {
       'Content-Type': 'application/json; charset=utf-8',
-      ...CORS_HEADERS
+      ...COMMON_HEADERS
     });
     res.end(JSON.stringify({ error: 'Forbidden' }));
     return true;
@@ -54,7 +72,7 @@ export function serveStaticFile(req, res, publicDir, pathname) {
       res.writeHead(200, {
         'Content-Type': contentType,
         'Content-Length': stat.size,
-        ...CORS_HEADERS
+        ...COMMON_HEADERS
       });
       fs.createReadStream(safePath).pipe(res);
       return true;
@@ -69,24 +87,23 @@ export function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(json),
-    ...CORS_HEADERS
+    ...COMMON_HEADERS
   });
   res.end(json);
 }
 
 export function sendNoContent(res) {
-  res.writeHead(204, CORS_HEADERS);
+  res.writeHead(204, COMMON_HEADERS);
   res.end();
 }
 
-export async function readJsonBody(req) {
+export async function readJsonBody(req, maxSizeBytes = 64 * 1024) {
   return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', (chunk) => {
       body += chunk;
-      if (body.length > 1e6) {
-        // 1MB limit
-        reject(new ValidationError('Payload too large'));
+      if (Buffer.byteLength(body) > maxSizeBytes) {
+        reject(new PayloadTooLargeError());
       }
     });
     req.on('end', () => {
@@ -106,11 +123,13 @@ export async function readJsonBody(req) {
 }
 
 export function createRequestHandler({
+  db,
   agendaService,
   taskService,
   briefingService,
   dashboardService,
-  publicDir = defaultPublicDir
+  publicDir = defaultPublicDir,
+  config = {}
 }) {
   return async (req, res) => {
     try {
@@ -119,8 +138,31 @@ export function createRequestHandler({
       const method = req.method.toUpperCase();
 
       if (method === 'OPTIONS') {
-        res.writeHead(204, CORS_HEADERS);
+        res.writeHead(204, COMMON_HEADERS);
         return res.end();
+      }
+
+      // Health Check Route
+      if (method === 'GET' && pathname === '/api/health') {
+        try {
+          if (db) {
+            db.prepare('SELECT 1 as alive').get();
+          }
+          const mode = briefingService?.analysisMode || briefingService?.mode || (process.env.LLM_API_KEY ? 'LLM_CLOUD' : 'HEURISTIC_LOCAL');
+          return sendJson(res, 200, {
+            status: 'ok',
+            database: 'connected',
+            mode,
+            timestamp: new Date().toISOString()
+          });
+        } catch (err) {
+          return sendJson(res, 503, {
+            status: 'error',
+            database: 'disconnected',
+            error: err.message,
+            timestamp: new Date().toISOString()
+          });
+        }
       }
 
       // Meeting Routes
@@ -226,6 +268,9 @@ export function createRequestHandler({
       // 404 Route Not Found
       return sendJson(res, 404, { error: `Route not found: ${method} ${pathname}` });
     } catch (err) {
+      if (err instanceof PayloadTooLargeError) {
+        return sendJson(res, 413, { error: err.message });
+      }
       if (err instanceof ValidationError) {
         return sendJson(res, 400, { error: err.message });
       }
@@ -257,6 +302,7 @@ export function createApp({
   const resolvedPublicDir = publicDir || config.publicDir || defaultPublicDir;
 
   const handler = createRequestHandler({
+    db,
     agendaService,
     taskService,
     briefingService: resolvedBriefingService,
