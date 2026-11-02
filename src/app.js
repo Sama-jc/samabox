@@ -1,14 +1,68 @@
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AgendaService, NotFoundError } from './services/agenda-service.js';
 import { TaskService } from './services/task-service.js';
 import { BriefingService } from './services/briefing-service.js';
+import { DashboardService } from './services/dashboard-service.js';
 import { ValidationError } from './domain/meeting.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const defaultPublicDir = path.resolve(__dirname, 'public');
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type'
 };
+
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8'
+};
+
+export function serveStaticFile(req, res, publicDir, pathname) {
+  const decoded = decodeURIComponent(pathname);
+  const targetRel = decoded === '/' ? '/index.html' : decoded;
+  const safePath = path.resolve(publicDir, '.' + targetRel);
+
+  // Prevent directory traversal attacks
+  if (!safePath.startsWith(publicDir)) {
+    res.writeHead(403, {
+      'Content-Type': 'application/json; charset=utf-8',
+      ...CORS_HEADERS
+    });
+    res.end(JSON.stringify({ error: 'Forbidden' }));
+    return true;
+  }
+
+  if (fs.existsSync(safePath)) {
+    const stat = fs.statSync(safePath);
+    if (stat.isFile()) {
+      const ext = path.extname(safePath).toLowerCase();
+      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Length': stat.size,
+        ...CORS_HEADERS
+      });
+      fs.createReadStream(safePath).pipe(res);
+      return true;
+    }
+  }
+
+  return false;
+}
 
 export function sendJson(res, statusCode, data) {
   const json = JSON.stringify(data);
@@ -51,7 +105,13 @@ export async function readJsonBody(req) {
   });
 }
 
-export function createRequestHandler({ agendaService, taskService, briefingService }) {
+export function createRequestHandler({
+  agendaService,
+  taskService,
+  briefingService,
+  dashboardService,
+  publicDir = defaultPublicDir
+}) {
   return async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -149,6 +209,20 @@ export function createRequestHandler({ agendaService, taskService, briefingServi
         return sendJson(res, 200, briefing);
       }
 
+      // Dashboard Routes
+      // GET /api/dashboard/summary
+      if (method === 'GET' && pathname === '/api/dashboard/summary') {
+        const date = url.searchParams.get('date') || undefined;
+        const summary = await dashboardService.getSummary(date);
+        return sendJson(res, 200, summary);
+      }
+
+      // Static File Serving (Non-API GET routes)
+      if (method === 'GET' && !pathname.startsWith('/api/')) {
+        const served = serveStaticFile(req, res, publicDir, pathname);
+        if (served) return;
+      }
+
       // 404 Route Not Found
       return sendJson(res, 404, { error: `Route not found: ${method} ${pathname}` });
     } catch (err) {
@@ -164,15 +238,30 @@ export function createRequestHandler({ agendaService, taskService, briefingServi
   };
 }
 
-export function createApp({ db, config = {}, briefingService } = {}) {
+export function createApp({
+  db,
+  config = {},
+  briefingService,
+  dashboardService,
+  publicDir
+} = {}) {
   const agendaService = new AgendaService(db);
   const taskService = new TaskService(db);
   const resolvedBriefingService = briefingService || new BriefingService({ db });
+  const resolvedDashboardService = dashboardService || new DashboardService({
+    briefingService: resolvedBriefingService,
+    agendaService,
+    taskService
+  });
+
+  const resolvedPublicDir = publicDir || config.publicDir || defaultPublicDir;
 
   const handler = createRequestHandler({
     agendaService,
     taskService,
     briefingService: resolvedBriefingService,
+    dashboardService: resolvedDashboardService,
+    publicDir: resolvedPublicDir,
     config
   });
 
@@ -180,5 +269,6 @@ export function createApp({ db, config = {}, briefingService } = {}) {
   server.agendaService = agendaService;
   server.taskService = taskService;
   server.briefingService = resolvedBriefingService;
+  server.dashboardService = resolvedDashboardService;
   return server;
 }
